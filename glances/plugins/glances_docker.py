@@ -79,7 +79,11 @@ class Plugin(GlancesPlugin):
         self.display_curse = True
 
         # Init the Docker API
-        self.docker_client = self.connect()
+        conf_docker_sock = self.get_conf_value('docker_sock')
+        if len(conf_docker_sock) == 0:
+            self.docker_clients = self.connect("unix://var/run/docker.sock")
+        else:
+            self.docker_clients = self.connect(conf_docker_sock)
 
         # Dict of thread (to grab stats asynchronously, one thread is created per container)
         # key: Container Id
@@ -130,18 +134,17 @@ class Plugin(GlancesPlugin):
 
         return ret
 
-    def connect(self):
+    def connect(self, base_urls:str|list = 'unix://var/run/docker.sock'):
         """Connect to the Docker server."""
+        # Init the Docker API Client
+        base_urls = [base_urls] if isinstance(base_urls, str) else base_urls
         try:
-            # If the following line replace the next one, the issue #1878
-            # is reproduced (Docker containers information missing with Docker 20.10.x)
-            # So, for the moment disable the timeout option
-            ret = docker.from_env()
+            # Do not use the timeout option (see issue #1878)
+            clients = [docker.DockerClient(url) for url in base_urls]
         except Exception as e:
-            logger.error("docker plugin - Can not connect to Docker ({})".format(e))
-            ret = None
-
-        return ret
+            logger.error("{} plugin - Can't connect to Docker ({})".format(self.ext_name, e))
+            clients = None
+        return clients
 
     def _all_tag(self):
         """Return the all tag of the Glances/Docker configuration file.
@@ -164,7 +167,7 @@ class Plugin(GlancesPlugin):
         stats = self.get_init_value()
 
         # The Docker-py lib is mandatory and connection should be ok
-        if import_error_tag or self.docker_client is None:
+        if import_error_tag or self.docker_clients is None:
             return self.stats
 
         if self.input_method == 'local':
@@ -181,7 +184,7 @@ class Plugin(GlancesPlugin):
             #     "GoVersion": "go1.3.3"
             # }
             try:
-                stats['version'] = self.docker_client.version()
+                stats['version'] = self.docker_clients[0].version()
             except Exception as e:
                 # Correct issue#649
                 logger.error("{} plugin - Cannot get Docker version ({})".format(self.plugin_name, e))
@@ -195,7 +198,9 @@ class Plugin(GlancesPlugin):
             try:
                 # Issue #1152: Docker module doesn't export details about stopped containers
                 # The Docker/all key of the configuration file should be set to True
-                containers = self.docker_client.containers.list(all=self._all_tag()) or []
+                # containers = self.docker_client.containers.list(all=self._all_tag()) or []
+                containers = []
+                [[containers.append(container_per_client) for container_per_client in client.containers.list(all=self._all_tag())] for client in self.docker_clients]
             except Exception as e:
                 logger.error("{} plugin - Cannot get containers list ({})".format(self.plugin_name, e))
                 # We may have lost connection empty the containers list.
